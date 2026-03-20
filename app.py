@@ -42,7 +42,16 @@ embedding_model = HuggingFaceEmbeddings(
 # -------------------------
 # 🗂️ FAISS DB
 # -------------------------
-vectorstore = FAISS.from_documents(docs, embedding_model)
+import os
+
+if os.path.exists("faiss_index"):
+    print("✅ Loading existing FAISS index...")
+    vectorstore = FAISS.load_local("faiss_index", embedding_model)
+else:
+    print("⚡ Creating FAISS index...")
+    vectorstore = FAISS.from_documents(docs, embedding_model)
+    vectorstore.save_local("faiss_index")
+
 retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
 
 # -------------------------
