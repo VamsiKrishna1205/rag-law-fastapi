@@ -1,4 +1,4 @@
-import os
+'''import os
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -105,5 +105,163 @@ def ask_question(request: QueryRequest):
 
 if __name__ == "__main__":
     # Port is dynamic for Render deployment
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)'''
+
+
+
+import os
+import uvicorn
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+
+# LangChain & Vector Store
+from langchain_community.document_loaders import PyPDFLoader
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_community.llms import HuggingFacePipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+
+app = FastAPI(title="Indian Law RAG API")
+
+# --- Configuration ---
+DATA_PATH = "Law Docs"
+INDEX_PATH = "faiss_index"
+MODEL_ID = "distilgpt2"   # ✅ smaller model (important for Render)
+
+# --- Global variables (lazy loading) ---
+vectorstore = None
+llm = None
+
+
+# --- 1. Load & Process Documents ---
+def initialize_vector_store():
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2",
+        model_kwargs={'device': 'cpu'}
+    )
+
+    if os.path.exists(INDEX_PATH):
+        print("✅ Loading existing FAISS index...")
+        return FAISS.load_local(
+            INDEX_PATH,
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+
+    print("⚡ Creating new FAISS index...")
+
+    if not os.path.exists(DATA_PATH):
+        os.makedirs(DATA_PATH)
+        return None
+
+    documents = []
+    for file in os.listdir(DATA_PATH):
+        if file.endswith(".pdf"):
+            loader = PyPDFLoader(os.path.join(DATA_PATH, file))
+            documents.extend(loader.load())
+
+    if not documents:
+        return None
+
+    text_splitter = RecursiveCharacterTextSplitter(
+        chunk_size=600,
+        chunk_overlap=100
+    )
+
+    docs = text_splitter.split_documents(documents)
+
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    vectorstore.save_local(INDEX_PATH)
+
+    return vectorstore
+
+
+# --- 2. Initialize LLM (lazy loading) ---
+def get_llm():
+    global llm
+
+    if llm is not None:
+        return llm
+
+    print("🚀 Loading LLM model...")
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_ID)
+
+    pipe = pipeline(
+        "text-generation",
+        model=model,
+        tokenizer=tokenizer,
+        max_new_tokens=150,
+        temperature=0.7,
+        repetition_penalty=1.1
+    )
+
+    llm = HuggingFacePipeline(pipeline=pipe)
+    return llm
+
+
+# --- Request Schema ---
+class QueryRequest(BaseModel):
+    query: str
+
+
+# --- Health Check ---
+@app.get("/")
+def home():
+    return {"status": "online", "message": "Indian Law RAG API is active 🚀"}
+
+
+# --- Main RAG Endpoint ---
+@app.post("/ask")
+def ask_question(request: QueryRequest):
+    global vectorstore
+
+    # ✅ Lazy load vectorstore
+    if vectorstore is None:
+        vectorstore = initialize_vector_store()
+
+    if not vectorstore:
+        raise HTTPException(
+            status_code=404,
+            detail="No legal documents found in 'Law Docs' folder."
+        )
+
+    # Retrieve relevant docs
+    retriever = vectorstore.as_retriever(search_kwargs={"k": 3})
+    retrieved_docs = retriever.invoke(request.query)
+
+    context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+
+    prompt = f"""
+    Context from Indian Law:
+    {context}
+
+    Question: {request.query}
+
+    Answer accurately based only on the context above:
+    """
+
+    # ✅ Lazy load LLM
+    llm_model = get_llm()
+    response = llm_model.invoke(prompt)
+
+    return {
+        "query": request.query,
+        "answer": response.replace(prompt, "").strip(),
+        "sources": [
+            {
+                "page": d.metadata.get("page"),
+                "file": d.metadata.get("source")
+            }
+            for d in retrieved_docs
+        ]
+    }
+
+
+# --- Run Server ---
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
