@@ -1,12 +1,13 @@
-fastapi
-uvicorn
-pydantic==1.10.13
-langchain
 langchain-community
 langchain-text-splitters
 pypdf
-faiss-cpu
 sentence-transformers
 transformers
 torch --index-url https://download.pytorch.org/whl/cpu
 langchain-huggingface
+fastapi==0.95.2
+uvicorn==0.22.0
+pydantic==1.10.13
+langchain
+faiss-cpu
+python-dotenv
